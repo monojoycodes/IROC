@@ -1,0 +1,92 @@
+# UAV Post-Flight Backend — Walkthrough
+
+## What Was Built
+
+A complete **FastAPI backend** that implements the UAV Post-Flight Backend PRD v1. The backend transforms Pixhawk flight logs into structured mission JSON consumable by the frozen React dashboard.
+
+## Architecture
+
+```mermaid
+graph TD
+    A["Pixhawk (ArduPilot)"] -->|MAVLink| B[MAVLink Client]
+    B -->|DISARM event| C[Mission Worker]
+    C -->|download| D[Log Downloader]
+    D -->|.BIN file| E[BIN Parser]
+    E -->|parsed data| F[Metrics Engine]
+    F -->|metrics| G[JSON Builder]
+    G -->|mission JSON| H["storage/missions/"]
+    I[FastAPI API] -->|reads| H
+    I -->|reads| J[State Manager]
+    C -->|updates| J
+    K[React Dashboard] -->|polls| I
+```
+
+## Files Created
+
+| File | Purpose |
+|---|---|
+| [main.py](file:///m:/IROC/UAV-backend/main.py) | FastAPI entry point, CORS, lifespan, static serving |
+| [core/state_manager.py](file:///m:/IROC/UAV-backend/core/state_manager.py) | Thread-safe mission lifecycle state machine |
+| [models/mission.py](file:///m:/IROC/UAV-backend/models/mission.py) | Pydantic response schemas |
+| [api/routes.py](file:///m:/IROC/UAV-backend/api/routes.py) | All 8 REST endpoints |
+| [processing/parser.py](file:///m:/IROC/UAV-backend/processing/parser.py) | ArduPilot .BIN log parser (pymavlink) |
+| [processing/metrics.py](file:///m:/IROC/UAV-backend/processing/metrics.py) | Flight analytics (duration, distance, battery) |
+| [processing/builder.py](file:///m:/IROC/UAV-backend/processing/builder.py) | Mission JSON builder (matches mockMission.js) |
+| [telemetry/mavlink_client.py](file:///m:/IROC/UAV-backend/telemetry/mavlink_client.py) | MAVLink heartbeat monitor + DISARM detection |
+| [telemetry/downloader.py](file:///m:/IROC/UAV-backend/telemetry/downloader.py) | MAVLink log download with progress |
+| [workers/mission_worker.py](file:///m:/IROC/UAV-backend/workers/mission_worker.py) | Background pipeline (simulation + live modes) |
+| [requirements.txt](file:///m:/IROC/UAV-backend/requirements.txt) | Python dependencies |
+
+## API Endpoints Tested
+
+All endpoints return valid JSON matching the frontend contract:
+
+| Endpoint | Status | Sample Response |
+|---|---|---|
+| `GET /api/health` | ✅ 200 | `{ "status": "ok", "uptime_seconds": 160.5, "last_mission_timestamp": "...", "log_size_mb": 0.08 }` |
+| `GET /api/mission/state` | ✅ 200 | `{ "state": "ready", "progress": 1.0, "message": "Mission SIM_... ready." }` |
+| `GET /api/mission/list` | ✅ 200 | `[{ "id": "SIM_...", "label": "Flight SIM_...", "timestamp": "..." }]` |
+| `GET /api/mission/latest` | ✅ 200 | Full mission JSON with `mission`, `battery`, `gps`, `profile`, `health`, `payload` |
+| `GET /api/downloads/meta` | ✅ 200 | `{ "raw_log_mb": null, "json_mb": 0.08 }` |
+| `GET /api/downloads/raw-log` | ✅ ready | FileResponse (no .BIN in simulation mode) |
+| `GET /api/downloads/processed-json` | ✅ ready | FileResponse of mission JSON |
+| `GET /payload/*` | ✅ ready | Static file serving from `storage/payload/` |
+
+## Simulation Mode Verification
+
+The worker successfully cycled through all lifecycle states:
+
+```
+idle → downloading (with 0–100% progress) → parsing → ready
+```
+
+Server startup log confirmed the full cycle in ~9 seconds.
+
+## How to Run
+
+### Development (Simulation Mode)
+```bash
+cd UAV-backend
+pip install -r requirements.txt
+python -m uvicorn main:app --reload --port 8000
+```
+
+### Live Mode (Pixhawk Connected)
+```bash
+set MAVLINK_CONNECTION=com3        # or udp:127.0.0.1:14550
+python -m uvicorn main:app --port 8000
+```
+
+### Frontend Integration
+The dashboard's Vite dev server can proxy to the backend. The backend serves on port 8000, and the frontend already uses `/api` prefix which can be configured in `vite.config.js`:
+
+```js
+export default defineConfig({
+  server: {
+    proxy: {
+      '/api': 'http://localhost:8000',
+      '/payload': 'http://localhost:8000',
+    }
+  }
+});
+```
