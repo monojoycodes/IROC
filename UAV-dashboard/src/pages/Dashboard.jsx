@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { fetchMission, fetchMissionById } from '../services/api';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { fetchMission, fetchMissionById, uploadBinLog } from '../services/api';
 import { fetchMissionState, fetchMissionList } from '../services/missions';
 import Sidebar from '../components/Sidebar';
 import Navbar from '../components/Navbar';
@@ -15,11 +15,36 @@ import Downloads from '../components/Downloads';
 import SeedManager from '../components/SeedManager';
 import SortiePanel from '../components/SortiePanel';
 import DetectionGallery from '../components/DetectionGallery';
+import InFlightView from '../components/InFlightView';
+
+const API = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000';
+
+function useLiveTelemetry() {
+    const [live, setLive] = useState(null);
+    useEffect(() => {
+        let mounted = true;
+        async function poll() {
+            try {
+                const res = await fetch(`${API}/api/live`);
+                if (res.ok && mounted) setLive(await res.json());
+            } catch {
+                if (mounted) setLive(prev => prev ? { ...prev, connected: false } : null);
+            }
+        }
+        poll();
+        const id = setInterval(poll, 250);
+        return () => { mounted = false; clearInterval(id); };
+    }, []);
+    return live;
+}
 
 export default function Dashboard() {
+    const live = useLiveTelemetry();
     const [data, setData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [uploading, setUploading] = useState(false);
+    const fileInputRef = useRef(null);
     const [activeSection, setActiveSection] = useState('overview');
 
     // PRD v2: Mission state (idle/downloading/parsing/ready/error)
@@ -36,8 +61,8 @@ export default function Dashboard() {
             const state = await fetchMissionState();
             setMissionState(state);
 
-            // If backend reports a non-ready state, don't try to load data
-            if (state && state.state !== 'ready') {
+            // If backend is actively downloading/parsing, block UI
+            if (state && state.state !== 'ready' && state.state !== 'idle') {
                 setLoading(false);
                 return;
             }
@@ -89,6 +114,22 @@ export default function Dashboard() {
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
     };
 
+    const handleFileUpload = async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setUploading(true);
+        setError(null);
+        try {
+            await uploadBinLog(file);
+            // After successful upload, the backend takes over parsing and we'll see missionState updates
+            loadMission();
+        } catch (err) {
+            setError(err.message);
+            setUploading(false);
+        }
+        if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+
     // Track active section on scroll
     useEffect(() => {
         const sectionIds = ['overview', 'seeds', 'sorties', 'detections', 'payload', 'battery', 'map', 'profile', 'health', 'downloads'];
@@ -109,13 +150,25 @@ export default function Dashboard() {
         });
 
         return () => observer.disconnect();
-    }, [data]);
+    }, [data, live?.armed]);
 
-    // ── Mission State Overlay (blocks dashboard until ready) ──
-    if (missionState && missionState.state !== 'ready' && !loading && !error) {
+    // ── In-Flight Mode ──
+    if (live?.armed) {
+        return (
+            <div className="app-layout inflight-layout">
+                <StatusBar live={live} mission={null} battery={null} />
+                <main className="inflight-main">
+                    <InFlightView live={live} />
+                </main>
+            </div>
+        );
+    }
+
+    // ΓöÇΓöÇ Mission State Overlay (blocks dashboard if downloading/parsing) ΓöÇΓöÇ
+    if (missionState && missionState.state !== 'ready' && missionState.state !== 'idle' && !loading && !error) {
         return (
             <div className="app-layout">
-                <StatusBar mission={null} battery={null} />
+                <StatusBar live={live} mission={null} battery={null} />
                 <Sidebar activeSection="overview" onSectionClick={() => { }} />
                 <Navbar missionStatus={null} onRefresh={() => loadMission()} loading={false} />
                 <main className="main-content">
@@ -128,45 +181,66 @@ export default function Dashboard() {
         );
     }
 
-    // ── Loading state ──
+    // ΓöÇΓöÇ Loading state ΓöÇΓöÇ
     if (loading) {
         return (
             <div className="app-layout">
-                <StatusBar mission={null} battery={null} />
+                <StatusBar live={live} mission={null} battery={null} />
                 <Sidebar activeSection="overview" onSectionClick={() => { }} />
                 <Navbar missionStatus={null} onRefresh={() => { }} loading={true} />
                 <main className="main-content">
                     <div className="spinner-container">
                         <div className="spinner" />
-                        <p style={{ color: 'var(--text-muted)' }}>Loading mission data…</p>
+                        <p style={{ color: 'var(--text-muted)' }}>Loading mission dataΓÇª</p>
                     </div>
                 </main>
             </div>
         );
     }
 
-    // ── Error state ──
+    // ΓöÇΓöÇ Error state ΓöÇΓöÇ
     if (error) {
         return (
             <div className="app-layout">
-                <StatusBar mission={null} battery={null} />
+                <StatusBar live={live} mission={null} battery={null} />
                 <Sidebar activeSection="overview" onSectionClick={() => { }} />
-                <Navbar missionStatus={null} onRefresh={() => loadMission()} loading={false} />
+                <Navbar
+                    missionStatus={null}
+                    onRefresh={() => loadMission()}
+                    loading={loading || uploading}
+                    missions={missions}
+                    selectedMission={selectedMission}
+                    onMissionSelect={handleMissionSelect}
+                />
                 <main className="main-content">
                     <div className="error-container">
-                        <h2>Mission Data Unavailable</h2>
+                        <h2>{uploading ? 'Uploading Log...' : 'Mission Data Unavailable'}</h2>
                         <p style={{ color: 'var(--text-secondary)', maxWidth: 480 }}>{error}</p>
-                        <button className="btn btn-primary" onClick={() => loadMission()}>Retry</button>
+                        <div style={{ display: 'flex', gap: 'var(--space-md)', marginTop: 'var(--space-md)' }}>
+                            <button className="btn btn-primary" onClick={() => loadMission()} disabled={uploading}>
+                                Retry Connection
+                            </button>
+                            <input 
+                                type="file" 
+                                accept=".bin" 
+                                style={{ display: 'none' }} 
+                                ref={fileInputRef}
+                                onChange={handleFileUpload} 
+                            />
+                            <button className="btn btn-secondary" onClick={() => fileInputRef.current?.click()} disabled={uploading}>
+                                Upload .BIN Log
+                            </button>
+                        </div>
                     </div>
                 </main>
             </div>
         );
     }
 
-    // ── Dashboard ──
+    // ΓöÇΓöÇ Dashboard ΓöÇΓöÇ
     return (
         <div className="app-layout">
-            <StatusBar mission={data.mission} battery={data.battery} />
+            <StatusBar live={live} mission={data.mission} battery={data.battery} />
             <Sidebar activeSection={activeSection} onSectionClick={handleSectionClick} />
             <Navbar
                 missionStatus={data.mission?.status}
@@ -181,7 +255,7 @@ export default function Dashboard() {
                 <SeedManager />
                 <SortiePanel />
                 <DetectionGallery />
-                <PayloadGallery data={data.payload} />
+                <PayloadGallery />
                 <BatteryPanel data={data.battery} />
                 <FlightMap data={data.gps} />
                 <FlightProfile data={data.profile} />

@@ -1,4 +1,4 @@
-import { RefreshCw } from 'lucide-react';
+﻿import { RefreshCw } from 'lucide-react';
 import BackendHealth from './BackendHealth';
 
 export default function Navbar({ missionStatus, onRefresh, loading, missions, selectedMission, onMissionSelect }) {

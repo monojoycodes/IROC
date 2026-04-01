@@ -30,6 +30,14 @@ async def health():
     return state_manager.get_health()
 
 
+# ── /api/live ─────────────────────────────────────────────
+
+@router.get("/live")
+async def live_telemetry():
+    """Live telemetry — polled every 3s by dashboard StatusBar."""
+    return state_manager.get_live()
+
+
 # ── /api/mission/state ────────────────────────────────────
 
 @router.get("/mission/state")

@@ -317,3 +317,133 @@ async def list_detections(sortie_id: str):
 
     data = json.loads(sortie_path.read_text(encoding="utf-8"))
     return {"sortie_id": sortie_id, "detections": data.get("detections", [])}
+
+
+# ═══════════════════════════════════════════════════════════
+# PAYLOAD PUSH — RPi WiFi image transfer to GCS dashboard
+# ═══════════════════════════════════════════════════════════
+# The RPi runs rpi_image_push.py which calls these endpoints.
+# Images are stored under storage/payload/<session_id>/
+# and served statically at /payload/<session_id>/<filename>
+
+PAYLOAD_DIR = STORAGE_DIR / "payload"
+
+
+@router.post("/payload/push")
+async def payload_push(
+    session_id: str = Form(...),
+    filename: str = Form(...),
+    timestamp: Optional[str] = Form(None),
+    image: UploadFile = File(...),
+):
+    """
+    Receive a single image from the RPi over WiFi.
+    Called by rpi_image_push.py for each image file.
+
+    Args:
+        session_id:  Unique session identifier (e.g. SESSION_20260401_190155)
+        filename:    Original filename on the RPi
+        timestamp:   ISO8601 capture time (defaults to server time)
+        image:       The image file (multipart)
+    """
+    if not image.content_type or not image.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image files are accepted.")
+
+    # Sanitise filename — keep basename only, no path traversal
+    safe_name = Path(filename).name
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    session_dir = PAYLOAD_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save image
+    content = await image.read()
+    dest = session_dir / safe_name
+    dest.write_bytes(content)
+
+    # Build image record
+    ts = timestamp or datetime.now(timezone.utc).isoformat()
+    record = {
+        "filename": safe_name,
+        "url": f"/payload/{session_id}/{safe_name}",
+        "timestamp": ts,
+        "size_kb": round(len(content) / 1024, 1),
+    }
+
+    # Append to session index
+    index_path = session_dir / "index.json"
+    if index_path.exists():
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+    else:
+        index = {
+            "session_id": session_id,
+            "started_at": ts,
+            "images": [],
+        }
+
+    # Avoid duplicates (re-push of same filename replaces old record)
+    index["images"] = [img for img in index["images"] if img["filename"] != safe_name]
+    index["images"].append(record)
+    index["image_count"] = len(index["images"])
+    index["last_updated"] = datetime.now(timezone.utc).isoformat()
+
+    index_path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+
+    logger.info(f"Payload push: {session_id}/{safe_name} ({record['size_kb']} KB)")
+    return {"ok": True, "url": record["url"], "session_id": session_id, "filename": safe_name}
+
+
+@router.get("/payload/list")
+async def payload_list():
+    """
+    Return all upload sessions and their images, newest session first.
+    Used by the PayloadGallery component.
+    """
+    if not PAYLOAD_DIR.exists():
+        return {"sessions": [], "total_images": 0}
+
+    sessions = []
+    for session_dir in sorted(PAYLOAD_DIR.iterdir(), key=lambda d: d.stat().st_mtime, reverse=True):
+        if not session_dir.is_dir():
+            continue
+        index_path = session_dir / "index.json"
+        if index_path.exists():
+            try:
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                sessions.append(index)
+            except (json.JSONDecodeError, OSError):
+                continue
+        else:
+            # Session dir exists but no index — scan manually
+            images = []
+            for f in sorted(session_dir.iterdir(), key=lambda x: x.stat().st_mtime):
+                if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp", ".webp"):
+                    images.append({
+                        "filename": f.name,
+                        "url": f"/payload/{session_dir.name}/{f.name}",
+                        "timestamp": datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc).isoformat(),
+                        "size_kb": round(f.stat().st_size / 1024, 1),
+                    })
+            if images:
+                sessions.append({
+                    "session_id": session_dir.name,
+                    "started_at": images[0]["timestamp"],
+                    "images": images,
+                    "image_count": len(images),
+                    "last_updated": images[-1]["timestamp"],
+                })
+
+    total = sum(s.get("image_count", 0) for s in sessions)
+    return {"sessions": sessions, "total_images": total}
+
+
+@router.delete("/payload/{session_id}")
+async def payload_delete_session(session_id: str):
+    """Delete an entire upload session and all its images."""
+    session_dir = PAYLOAD_DIR / session_id
+    if not session_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
+    shutil.rmtree(session_dir)
+    logger.info(f"Deleted payload session: {session_id}")
+    return {"deleted": session_id}

@@ -257,6 +257,11 @@ async def _run_live_worker(connection_string: str):
             disarm_event.clear()
             logger.info("DISARM event received — starting pipeline")
 
+            # Stop MAVLink listener to release the COM port for downloading
+            logger.info("Stopping MAVLink listener to free COM port…")
+            client.stop()
+            await asyncio.sleep(3)  # Give Windows time to fully release the COM port
+
             try:
                 # Generate mission ID
                 mission_id = f"FLT_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
@@ -306,10 +311,25 @@ async def _run_live_worker(connection_string: str):
                 logger.error(f"Pipeline error: {e}", exc_info=True)
                 state_manager.set_error(f"Processing failed: {e}")
 
-            # Wait before accepting next mission
+            # Wait before restarting listener — prevents false DISARM detection
+            # The Pixhawk is still disarmed, so restarting too soon would pick up
+            # a stale armed→disarmed transition from the heartbeat stream
+            logger.info("Waiting 10s before restarting MAVLink listener (debounce)…")
+            await asyncio.sleep(10)
+
+            # Clear any stale disarm events that fired during the wait
+            disarm_event.clear()
+
+            # Restart MAVLink listener for next flight
+            logger.info("Restarting MAVLink listener…")
+            client = MAVLinkClient(connection_string)
+            client.set_disarm_callback(on_disarm)
+            client.start()
+
+            # Wait for listener to stabilize, then clear any false events
             await asyncio.sleep(5)
-            if state_manager.state == MissionState.READY:
-                state_manager.set_idle("Waiting for next flight…")
+            disarm_event.clear()
+            logger.info("Listener stabilized. Ready for next flight.")
 
     finally:
         client.stop()

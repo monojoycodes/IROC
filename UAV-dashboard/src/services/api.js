@@ -45,6 +45,23 @@ export async function fetchMissionById(id) {
 }
 
 /**
+ * Upload a raw .BIN log file manually.
+ */
+export async function uploadBinLog(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${API_BASE}/upload/log`, {
+        method: 'POST',
+        body: formData,
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || `Upload failed: ${res.status}`);
+    }
+    return res.json();
+}
+
+/**
  * Download URL helpers
  */
 export const downloadUrls = {

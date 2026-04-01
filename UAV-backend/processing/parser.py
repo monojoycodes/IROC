@@ -67,6 +67,24 @@ def parse_bin_log(log_path: str | Path) -> dict:
                     "current": getattr(msg, 'Curr', 0),
                     "remaining": getattr(msg, 'CurrTot', None),
                 })
+            
+            elif msg_type == 'MOTB':
+                # MOTB (Motor Battery) fallback for older/custom firmwares
+                battery.append({
+                    "timestamp": timestamp,
+                    "voltage": getattr(msg, 'BatVolt', 0),
+                    "current": getattr(msg, 'BatCur', 0),
+                    "remaining": None,
+                })
+
+            elif msg_type == 'POWR' and len(battery) == 0:
+                # Last resort fallback to board voltage if no battery msg seen yet
+                battery.append({
+                    "timestamp": timestamp,
+                    "voltage": getattr(msg, 'Vcc', 0) / 1000.0 if getattr(msg, 'Vcc', 0) > 100 else getattr(msg, 'Vcc', 0), # Vcc is usually mV, but sometimes V
+                    "current": 0,
+                    "remaining": None,
+                })
 
             elif msg_type == 'BARO':
                 altitude.append({

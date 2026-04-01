@@ -29,10 +29,16 @@ npm run dev
 
 Runs on `http://localhost:5173`.
 
-## Reset Server State
+## Reset Server State (Testing)
 
 ```powershell
 Invoke-RestMethod -Method POST -Uri http://localhost:8000/simulate/reset
 ```
 
 Resets the backend state back to idle — useful for re-testing dashboard transitions.
+
+```powershell
+Invoke-RestMethod -Method POST -Uri http://localhost:8000/simulate/trigger
+```
+
+Trigers the service again
